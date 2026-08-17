@@ -198,6 +198,10 @@ func (p *Provider) transformOut(plain []byte) ([]byte, string, error) {
 		}
 		data = buf.Bytes()
 	}
+	// Hash the pre-encryption payload so content-addressed dedup works with AES-GCM
+	// (random nonces would otherwise make identical plaintext non-deduplicable).
+	hash := sha256.Sum256(data)
+	hashHex := hex.EncodeToString(hash[:])
 	if cfg.Encrypt {
 		out, err := seal(cfg.AESKey, data)
 		if err != nil {
@@ -205,8 +209,7 @@ func (p *Provider) transformOut(plain []byte) ([]byte, string, error) {
 		}
 		data = out
 	}
-	hash := sha256.Sum256(data)
-	return data, hex.EncodeToString(hash[:]), nil
+	return data, hashHex, nil
 }
 
 func (p *Provider) transformIn(blob []byte) ([]byte, error) {

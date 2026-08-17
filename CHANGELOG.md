@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- MinIO / S3 backend via `OVERLAY_BACKEND=minio|s3` + `S3_*` / `OVERLAY_S3_*` env
+- gofakes3 + optional MinIO Docker overlay round-trip tests
+
 ## [0.1.0] — 2026-08-10
 
 ### Added
