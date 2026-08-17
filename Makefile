@@ -1,5 +1,5 @@
 .PHONY: test build
 test:
-	CGO_ENABLED=0 go test ./...
+	CGO_ENABLED=0 go test -count=1 -timeout 120s ./...
 build:
 	CGO_ENABLED=0 go build -o bin/storage-overlay ./cmd/module
