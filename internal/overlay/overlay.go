@@ -18,21 +18,21 @@ import (
 )
 
 // Config controls overlay transforms applied before the backend store.
-type Config struct {
-	Encrypt     bool
-	Compress    bool
-	Dedup       bool
-	AESKey      []byte // 16/24/32 bytes when Encrypt
+type Config struct { //nolint:govet // fieldalignment: overlay flags grouped for readability
+	Encrypt       bool
+	Compress      bool
+	Dedup         bool
+	AESKey        []byte // 16/24/32 bytes when Encrypt
 	BackendPrefix string
 }
 
 // MemBackend is an in-memory StorageProvider used as the default backend.
-type MemBackend struct {
+type MemBackend struct { //nolint:govet // fieldalignment: mutex before map for readability
 	mu   sync.RWMutex
 	objs map[string]memObj
 }
 
-type memObj struct {
+type memObj struct { //nolint:govet // fieldalignment: data before metadata timestamp
 	data    []byte
 	modTime time.Time
 }
@@ -45,9 +45,6 @@ func (m *MemBackend) Put(_ context.Context, key string, data io.Reader, size int
 	buf, err := io.ReadAll(data)
 	if err != nil {
 		return err
-	}
-	if size > 0 && int64(len(buf)) != size {
-		// tolerate mismatch; prefer actual length
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -77,7 +74,7 @@ func (m *MemBackend) Move(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	buf, err := io.ReadAll(rc)
 	if err != nil {
 		return err
@@ -125,7 +122,7 @@ func hasPrefix(s, p string) bool {
 var _ contracts.StorageProvider = (*MemBackend)(nil)
 
 // Provider wraps a backend StorageProvider with optional encrypt/compress/dedup.
-type Provider struct {
+type Provider struct { //nolint:govet // fieldalignment: mutex and config grouped for readability
 	mu      sync.RWMutex
 	cfg     Config
 	backend contracts.StorageProvider
@@ -297,7 +294,7 @@ func (p *Provider) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	blob, err := io.ReadAll(rc)
 	if err != nil {
 		return nil, err
@@ -364,7 +361,7 @@ func (p *Provider) Move(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	buf, err := io.ReadAll(rc)
 	if err != nil {
 		return err
@@ -394,7 +391,7 @@ func (p *Provider) Stat(ctx context.Context, key string) (contracts.ObjectInfo, 
 	if err != nil {
 		return contracts.ObjectInfo{}, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	buf, err := io.ReadAll(rc)
 	if err != nil {
 		return contracts.ObjectInfo{}, err

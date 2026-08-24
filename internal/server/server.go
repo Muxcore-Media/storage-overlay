@@ -17,7 +17,7 @@ import (
 )
 
 // Server exposes StorageService backed by an overlay Provider.
-type Server struct {
+type Server struct { //nolint:govet // fieldalignment: embedded server type first
 	storagev1.UnimplementedStorageServiceServer
 	mu      sync.RWMutex
 	backend *overlay.Provider
@@ -54,7 +54,7 @@ func (s *Server) Put(stream storagev1.StorageService_PutServer) error {
 	)
 	for {
 		msg, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -94,7 +94,7 @@ func (s *Server) Get(req *storagev1.GetRequest, stream storagev1.StorageService_
 	if err != nil {
 		return mapStatus(err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	info, _ := st.Stat(stream.Context(), req.GetKey())
 	buf := make([]byte, 32*1024)
