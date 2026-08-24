@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -20,7 +21,7 @@ import (
 	"github.com/Muxcore-Media/storage-overlay/internal/server"
 )
 
-type Module struct {
+type Module struct { //nolint:govet // fieldalignment: lifecycle fields grouped for readability
 	id       string
 	grpcAddr string
 	httpAddr string
@@ -42,7 +43,7 @@ type Module struct {
 	httpSrv  *http.Server
 }
 
-type Config struct {
+type Config struct { //nolint:govet // fieldalignment: config fields grouped for readability
 	ID       string
 	Encrypt  bool
 	Compress bool
@@ -57,6 +58,18 @@ type Config struct {
 }
 
 func NewModule(cfg Config) *Module {
+	cfg = applyOverlayDefaults(cfg)
+	cfg = applyOverlayEnv(cfg)
+	cfg = applyS3Env(cfg)
+	return &Module{
+		id: cfg.ID, grpcAddr: cfg.GRPCAddr, httpAddr: cfg.HTTPAddr,
+		encrypt: cfg.Encrypt, compress: cfg.Compress, dedup: cfg.Dedup,
+		aesKey: append([]byte(nil), cfg.AESKey...), prefix: cfg.Prefix,
+		backendKind: cfg.Backend, s3: cfg.S3,
+	}
+}
+
+func applyOverlayDefaults(cfg Config) Config {
 	if cfg.ID == "" {
 		cfg.ID = "storage-overlay"
 	}
@@ -66,6 +79,19 @@ func NewModule(cfg Config) *Module {
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = ":9691"
 	}
+	if len(cfg.AESKey) == 0 {
+		cfg.AESKey = bytesRepeat(0x11, 32)
+	}
+	if cfg.Backend == "" {
+		cfg.Backend = "memory"
+	}
+	if os.Getenv("OVERLAY_ENCRYPT") == "" && os.Getenv("OVERLAY_COMPRESS") == "" && os.Getenv("OVERLAY_DEDUP") == "" {
+		cfg.Compress = true
+	}
+	return cfg
+}
+
+func applyOverlayEnv(cfg Config) Config {
 	if v := os.Getenv("OVERLAY_ENCRYPT"); v != "" {
 		cfg.Encrypt = v == "1" || strings.EqualFold(v, "true")
 	}
@@ -80,9 +106,6 @@ func NewModule(cfg Config) *Module {
 			cfg.AESKey = b
 		}
 	}
-	if len(cfg.AESKey) == 0 {
-		cfg.AESKey = bytesRepeat(0x11, 32)
-	}
 	if v := os.Getenv("OVERLAY_PREFIX"); v != "" {
 		cfg.Prefix = v
 	}
@@ -95,62 +118,44 @@ func NewModule(cfg Config) *Module {
 	if v := os.Getenv("OVERLAY_BACKEND"); v != "" {
 		cfg.Backend = strings.ToLower(strings.TrimSpace(v))
 	}
-	if cfg.Backend == "" {
-		cfg.Backend = "memory"
-	}
-	// MinIO / S3 env (shared names with storage-s3 where sensible).
-	if v := os.Getenv("OVERLAY_S3_ENDPOINT"); v != "" {
-		cfg.S3.Endpoint = v
-	} else if v := os.Getenv("S3_ENDPOINT"); v != "" {
+	return cfg
+}
+
+func applyS3Env(cfg Config) Config {
+	if v := firstEnv("OVERLAY_S3_ENDPOINT", "S3_ENDPOINT"); v != "" {
 		cfg.S3.Endpoint = v
 	}
-	if v := os.Getenv("OVERLAY_S3_BUCKET"); v != "" {
-		cfg.S3.Bucket = v
-	} else if v := os.Getenv("S3_BUCKET"); v != "" {
+	if v := firstEnv("OVERLAY_S3_BUCKET", "S3_BUCKET"); v != "" {
 		cfg.S3.Bucket = v
 	}
-	if v := os.Getenv("OVERLAY_S3_ACCESS_KEY"); v != "" {
-		cfg.S3.AccessKey = v
-	} else if v := os.Getenv("S3_ACCESS_KEY"); v != "" {
+	if v := firstEnv("OVERLAY_S3_ACCESS_KEY", "S3_ACCESS_KEY"); v != "" {
 		cfg.S3.AccessKey = v
 	}
-	if v := os.Getenv("OVERLAY_S3_SECRET_KEY"); v != "" {
-		cfg.S3.SecretKey = v
-	} else if v := os.Getenv("S3_SECRET_KEY"); v != "" {
+	if v := firstEnv("OVERLAY_S3_SECRET_KEY", "S3_SECRET_KEY"); v != "" {
 		cfg.S3.SecretKey = v
 	}
-	if v := os.Getenv("OVERLAY_S3_PREFIX"); v != "" {
-		cfg.S3.Prefix = v
-	} else if v := os.Getenv("S3_PREFIX"); v != "" {
+	if v := firstEnv("OVERLAY_S3_PREFIX", "S3_PREFIX"); v != "" {
 		cfg.S3.Prefix = v
 	}
-	if v := os.Getenv("OVERLAY_S3_REGION"); v != "" {
-		cfg.S3.Region = v
-	} else if v := os.Getenv("S3_REGION"); v != "" {
+	if v := firstEnv("OVERLAY_S3_REGION", "S3_REGION"); v != "" {
 		cfg.S3.Region = v
 	}
-	if v := os.Getenv("OVERLAY_S3_USE_SSL"); v != "" {
-		cfg.S3.UseSSL = v == "1" || strings.EqualFold(v, "true")
-	} else if v := os.Getenv("S3_USE_SSL"); v != "" {
+	if v := firstEnv("OVERLAY_S3_USE_SSL", "S3_USE_SSL"); v != "" {
 		cfg.S3.UseSSL = v == "1" || strings.EqualFold(v, "true")
 	}
 	pathStyle := true
-	if v := os.Getenv("OVERLAY_S3_PATH_STYLE"); v != "" {
-		pathStyle = v == "1" || strings.EqualFold(v, "true")
-	} else if v := os.Getenv("S3_PATH_STYLE"); v != "" {
+	if v := firstEnv("OVERLAY_S3_PATH_STYLE", "S3_PATH_STYLE"); v != "" {
 		pathStyle = v == "1" || strings.EqualFold(v, "true")
 	}
 	cfg.S3.PathStyle = pathStyle
-	// Defaults suitable for a useful scaffold demo.
-	if os.Getenv("OVERLAY_ENCRYPT") == "" && os.Getenv("OVERLAY_COMPRESS") == "" && os.Getenv("OVERLAY_DEDUP") == "" {
-		cfg.Compress = true
+	return cfg
+}
+
+func firstEnv(primary, fallback string) string {
+	if v := os.Getenv(primary); v != "" {
+		return v
 	}
-	return &Module{
-		id: cfg.ID, grpcAddr: cfg.GRPCAddr, httpAddr: cfg.HTTPAddr,
-		encrypt: cfg.Encrypt, compress: cfg.Compress, dedup: cfg.Dedup,
-		aesKey: append([]byte(nil), cfg.AESKey...), prefix: cfg.Prefix,
-		backendKind: cfg.Backend, s3: cfg.S3,
-	}
+	return os.Getenv(fallback)
 }
 
 func bytesRepeat(b byte, n int) []byte {
@@ -207,7 +212,8 @@ func (m *Module) Init(ctx context.Context) error {
 		return err
 	}
 	m.provider = p
-	lis, err := net.Listen("tcp", m.grpcAddr)
+	var lc net.ListenConfig
+	lis, err := lc.Listen(ctx, "tcp", m.grpcAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", m.grpcAddr, err)
 	}
@@ -217,7 +223,11 @@ func (m *Module) Init(ctx context.Context) error {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	m.httpSrv = &http.Server{Addr: m.httpAddr, Handler: mux}
+	m.httpSrv = &http.Server{
+		Addr:              m.httpAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	slog.Info("storage-overlay initialized",
 		"backend", m.backendKind, "encrypt", m.encrypt, "compress", m.compress, "dedup", m.dedup, "grpc", m.grpcAddr)
 	return nil
