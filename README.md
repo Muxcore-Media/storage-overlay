@@ -1,30 +1,47 @@
 # storage-overlay
 
-Transparent storage overlay for MuxCore: **encryption**, **compression**, and **content-hash dedup**.
+Transparent storage overlay for MuxCore: **encryption**, **compression**, and **content-hash dedup** over an upstream `StorageProvider` or a laptop fallback backend.
 
-Backends: in-memory (default) or **MinIO / S3** (`OVERLAY_BACKEND=minio`).
+Primary mode: wrap another mesh module (`OVERLAY_UPSTREAM=storage-s3`). Fallbacks: **MinIO / S3** (`OVERLAY_BACKEND=minio`) or in-memory (`OVERLAY_ALLOW_MEMORY=1` for tests only).
 
 ## Pipeline
 
 ```
-Put:  plaintext → [gzip] → content-hash (SHA-256) → [AES-GCM] → backend
-Get:  backend → [resolve hash] → [AES-GCM open] → [gunzip] → plaintext
+Put:  plaintext → [gzip] → content-hash (SHA-256) → [chunked AES-GCM] → backend
+Get:  backend → [chunk decrypt] → [gunzip] → plaintext (streamed; no full-blob ReadAll)
 ```
 
-Dedup keys blobs by the **pre-encryption** digest (after optional gzip) so identical logical payloads share one ciphertext object even though AES-GCM uses a fresh nonce per seal.
+Dedup keys blobs by the **pre-encryption** digest (after optional gzip). Identical logical payloads share one ciphertext object.
 
-## Run (memory)
+## Environment
+
+| Variable | Purpose |
+|----------|---------|
+| `OVERLAY_UPSTREAM` | Upstream storage module id (e.g. `storage-s3`). Requires `MUXCORE_GRPC_ADDR`. |
+| `OVERLAY_BACKEND` | `upstream` (via `OVERLAY_UPSTREAM`), `minio`/`s3`, or `memory` |
+| `OVERLAY_ALLOW_MEMORY` | Must be `1` to allow ephemeral memory backend (dev/tests) |
+| `OVERLAY_ENCRYPT` | `true`/`1` to enable AES-GCM |
+| `OVERLAY_COMPRESS` | `true`/`1` for gzip (default on when unset) |
+| `OVERLAY_DEDUP` | `true`/`1` for content-hash dedup |
+| `OVERLAY_AES_KEY_HEX` | **Required** when encrypt is on — 16/24/32-byte key as hex. The built-in demo key is **refused**. |
+| `OVERLAY_PREFIX` | Optional key prefix on the backend |
+| `OVERLAY_S3_*` / `S3_*` | MinIO/S3 endpoint, bucket, creds (when `OVERLAY_BACKEND=minio`) |
+| `STORAGE_OVERLAY_GRPC_ADDR` | gRPC listen (default `:9690`) |
+| `STORAGE_OVERLAY_HTTP_ADDR` | HTTP `/health` (default `:9691`) |
+
+## Run (wrap upstream storage-s3)
 
 ```bash
-export OVERLAY_ENCRYPT=true
-export OVERLAY_COMPRESS=true
-export OVERLAY_DEDUP=true
-export OVERLAY_AES_KEY_HEX=$(openssl rand -hex 32)
+export MUXCORE_GRPC_ADDR=127.0.0.1:9090
 export MUXCORE_INSECURE_DISABLE_TLS=true
+export MUXCORE_MESH_DIAL_LOCAL=true
+export OVERLAY_UPSTREAM=storage-s3
+export OVERLAY_ENCRYPT=true
+export OVERLAY_AES_KEY_HEX=$(openssl rand -hex 32)
 go run ./cmd/module
 ```
 
-## Run (MinIO backend)
+## Run (MinIO backend — durable laptop path)
 
 ```bash
 # terminal A
@@ -46,42 +63,34 @@ export MUXCORE_INSECURE_DISABLE_TLS=true
 go run ./cmd/module
 ```
 
-(`OVERLAY_S3_*` env vars override the shared `S3_*` names when set.)
+## MVP stack (`_mvp/run-host.sh`)
 
-gRPC `:9690`, health `:9691`.
+`MVP_ENABLE_STORAGE_OVERLAY=1` requires `OVERLAY_AES_KEY_HEX`, defaults to MinIO backend (`OVERLAY_BACKEND=minio`), and enables encrypt/compress/dedup. Memory backend is blocked unless `OVERLAY_ALLOW_MEMORY=1`.
 
 ## Settings
 
-`encrypt`, `compress`, `dedup`, `aes_key_hex`, `prefix`.
+`backend`, `upstream`, `encrypt`, `compress`, `dedup`, `aes_key_hex`, `prefix`, plus S3 fields when backend is `minio`/`s3`.
+
+Runtime toggles of `encrypt` / `compress` / `dedup` are **rejected** (on-disk layout). Secret updates accept masked `********` without wiping the key.
 
 ## Threat model & key handling
 
 **What this protects against**
 
-- Backend observer (disk snapshot, misconfigured object store, stolen bucket credentials) who can read stored blobs but **not** the AES key: ciphertext and metadata hashes leak object sizes / equality (same content → same blob key when dedup is on), not plaintext.
-- Accidental leftover of highly compressible media on a shared volume when compress+encrypt are both enabled.
+- Backend observer who can read stored blobs but **not** the AES key: ciphertext and metadata hashes leak object sizes / equality (same content → same blob key when dedup is on), not plaintext.
 
 **What this does not protect against**
 
-- Anyone who can read process memory, env, or MuxCore settings (the AES key lives there).
+- Anyone who can read process memory, env, or MuxCore settings.
 - Compromised module process or gRPC peer that can call Put/Get with the live provider.
-- Integrity of the *index* under a malicious backend (tampered meta→hash mappings); AES-GCM detects ciphertext truncation/forgery for a given key but cannot prove the logical key pointed at the right hash.
-- Key compromise retroactively: all historical blobs sealed with that key are readable.
 
-**Key handling (local / laptop)**
+**Key handling**
 
 | Source | Behavior |
 |--------|----------|
-| `OVERLAY_AES_KEY_HEX` | Preferred. Hex of 16, 24, or 32 bytes (AES-128/192/256). Generate with `openssl rand -hex 32`. |
-| Setting `aes_key_hex` | Same bytes via admin settings UI; stored/displayed as a **secret** (masked). Masked placeholder `********` is ignored on update so re-saves do not wipe the key. |
-| Built-in default | If neither env nor config supplies a key, the module uses a **fixed demo key** (`0x11` × 32). **Do not use that default outside local demos.** Enable encrypt only after setting a real key. |
-
-Operational notes:
-
-- Treat `OVERLAY_AES_KEY_HEX` like a password: keep it out of git, shell history where possible, and shared logs.
-- Changing the key without re-writing objects makes existing ciphertext unreadable; there is no automatic re-key.
-- Dedup meta stores content hashes in the clear on the backend; hashes are not secret and can reveal which logical keys share bytes.
-- Memory backend is for tests and single-process demos. **MinIO / S3** (`OVERLAY_BACKEND=minio`) is the durable at-rest path for laptop demos.
+| `OVERLAY_AES_KEY_HEX` | Preferred. Hex of 16, 24, or 32 bytes. Generate with `openssl rand -hex 32`. |
+| Setting `aes_key_hex` | Same bytes via admin settings; masked on display. |
+| Built-in demo key (`0x11`×32) | Used only when encrypt is **off**. **Init/UpdateSetting refuse it when encrypt is on.** |
 
 ## Tests
 
@@ -89,6 +98,7 @@ Operational notes:
 make test
 ```
 
-- Memory encrypt/compress/dedup round-trips
+- Streaming encrypt/compress/dedup round-trips
+- Durable dedup refcounts across provider restart
+- gRPC bufconn Put/Get/Delete/Stat/range
 - gofakes3-backed MinIO-shaped overlay round-trip
-- Optional real MinIO Docker smoke (skips without Docker)

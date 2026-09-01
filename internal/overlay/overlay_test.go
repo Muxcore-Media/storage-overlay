@@ -6,7 +6,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/Muxcore-Media/storage-overlay/internal/overlay"
@@ -71,22 +74,10 @@ func TestCompressRoundTrip_ShrinksAndRestores(t *testing.T) {
 	}
 	stored := readAll(t, raw)
 	if len(stored) >= len(plain) {
-		t.Fatalf("expected gzip to shrink %d → got stored %d", len(plain), len(stored))
+		t.Fatalf("expected stored payload smaller than %d, got %d", len(plain), len(stored))
 	}
-	if stored[0] != 0x1f || stored[1] != 0x8b {
-		t.Fatalf("stored blob missing gzip magic: %x", stored[:2])
-	}
-	zr, err := gzip.NewReader(bytes.NewReader(stored))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ungzip, err := io.ReadAll(zr)
-	_ = zr.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(ungzip, plain) {
-		t.Fatal("backend gzip payload does not round-trip via stdlib gunzip")
+	if stored[0] != 'M' || stored[1] != 'X' || stored[2] != 'O' {
+		t.Fatalf("stored blob missing stream magic: %x", stored[:3])
 	}
 
 	got := readAll(t, mustGet(t, p, ctx, "big.bin"))
@@ -128,9 +119,21 @@ func TestDedupSharesSingleBlob(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h := string(readAll(t, rc))
-		if h != wantHash {
-			t.Fatalf("%s hash=%q want %q", meta, h, wantHash)
+		raw := readAll(t, rc)
+		var hash string
+		if raw[0] == '{' {
+			var om struct {
+				Hash string `json:"hash"`
+			}
+			if err := json.Unmarshal(raw, &om); err != nil {
+				t.Fatal(err)
+			}
+			hash = om.Hash
+		} else {
+			hash = string(raw)
+		}
+		if hash != wantHash {
+			t.Fatalf("%s hash=%q want %q", meta, hash, wantHash)
 		}
 	}
 
@@ -256,4 +259,66 @@ func mustBackendGet(t *testing.T, b *overlay.MemBackend, ctx context.Context, ke
 		t.Fatal(err)
 	}
 	return rc
+}
+
+func TestDedupRefcountSurvivesRestart(t *testing.T) {
+	backend := overlay.NewMemBackend()
+	cfg := overlay.Config{Dedup: true, Compress: true, BackendPrefix: "ov"}
+	p1, err := overlay.New(cfg, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := p1.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("shared-payload-for-restart-test")
+	if err := p1.Put(ctx, "k1", bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if err := p1.Put(ctx, "k2", bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+
+	p2, err := overlay.New(cfg, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p2.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p2.Delete(ctx, "k1"); err != nil {
+		t.Fatal(err)
+	}
+	got := readAll(t, mustGet(t, p2, ctx, "k2"))
+	if !bytes.Equal(got, body) {
+		t.Fatalf("k2 after restart+delete k1: got %q", got)
+	}
+}
+
+type errDeleteBackend struct {
+	*overlay.MemBackend
+}
+
+func (e *errDeleteBackend) Delete(_ context.Context, key string) error {
+	if strings.Contains(key, "blobs/") {
+		return fmt.Errorf("injected delete failure")
+	}
+	return e.MemBackend.Delete(context.Background(), key)
+}
+
+func TestDeleteSurfacesBackendError(t *testing.T) {
+	backend := &errDeleteBackend{MemBackend: overlay.NewMemBackend()}
+	p, err := overlay.New(overlay.Config{Dedup: true, BackendPrefix: "ov"}, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	body := []byte("unique-delete-error-payload")
+	if err := p.Put(ctx, "only", bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Delete(ctx, "only"); err == nil {
+		t.Fatal("expected backend delete error")
+	}
 }

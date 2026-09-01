@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/Muxcore-Media/core v0.5.8
 	github.com/Muxcore-Media/core/pkg/contracts v0.5.8
+	github.com/Muxcore-Media/core/sdk/go/client v0.5.8
 	github.com/Muxcore-Media/core/sdk/go/module v0.5.8
 	github.com/johannesboyne/gofakes3 v1.2.0
 	github.com/minio/minio-go/v7 v7.2.1
@@ -13,6 +14,7 @@ require (
 
 require (
 	github.com/Muxcore-Media/contracts-media v0.1.0 // indirect
+	github.com/Muxcore-Media/core/pkg/tenant v0.5.8 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -43,3 +45,5 @@ replace github.com/Muxcore-Media/core => ../core
 replace github.com/Muxcore-Media/core/pkg/contracts => ../core/pkg/contracts
 
 replace github.com/Muxcore-Media/core/sdk/go/module => ../core/sdk/go/module
+
+replace github.com/Muxcore-Media/core/sdk/go/client => ../core/sdk/go/client

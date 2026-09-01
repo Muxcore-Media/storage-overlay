@@ -33,8 +33,10 @@ type Module struct { //nolint:govet // fieldalignment: lifecycle fields grouped 
 	aesKey   []byte
 	prefix   string
 
-	backendKind string // memory | s3 | minio
-	s3          overlay.S3Config
+	backendKind  string // upstream | memory | s3 | minio
+	upstreamID   string
+	s3           overlay.S3Config
+	upstreamStop func()
 
 	provider *overlay.Provider
 	srv      *server.Server
@@ -53,8 +55,9 @@ type Config struct { //nolint:govet // fieldalignment: config fields grouped for
 	GRPCAddr string
 	HTTPAddr string
 
-	Backend string // memory (default) | s3 | minio
-	S3      overlay.S3Config
+	Backend    string // upstream | memory (default) | s3 | minio
+	UpstreamID string
+	S3         overlay.S3Config
 }
 
 func NewModule(cfg Config) *Module {
@@ -65,7 +68,7 @@ func NewModule(cfg Config) *Module {
 		id: cfg.ID, grpcAddr: cfg.GRPCAddr, httpAddr: cfg.HTTPAddr,
 		encrypt: cfg.Encrypt, compress: cfg.Compress, dedup: cfg.Dedup,
 		aesKey: append([]byte(nil), cfg.AESKey...), prefix: cfg.Prefix,
-		backendKind: cfg.Backend, s3: cfg.S3,
+		backendKind: cfg.Backend, upstreamID: cfg.UpstreamID, s3: cfg.S3,
 	}
 }
 
@@ -117,6 +120,10 @@ func applyOverlayEnv(cfg Config) Config {
 	}
 	if v := os.Getenv("OVERLAY_BACKEND"); v != "" {
 		cfg.Backend = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v := os.Getenv("OVERLAY_UPSTREAM"); v != "" {
+		cfg.UpstreamID = strings.TrimSpace(v)
+		cfg.Backend = "upstream"
 	}
 	return cfg
 }
@@ -170,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID: m.id, Name: "Storage Overlay", Version: "0.1.0",
 		Roles:        []string{"storage", "infrastructure"},
-		Description:  "Storage overlay: encryption, compression, content-hash dedup",
+		Description:  "Storage overlay: encryption, compression, content-hash dedup over upstream storage",
 		Author:       "MuxCore",
 		Capabilities: []string{"storage", "storage.overlay", "settings"},
 		Contracts: []contracts.ContractDeclaration{
@@ -191,10 +198,24 @@ func (m *Module) overlayConfig() overlay.Config {
 }
 
 func (m *Module) Init(ctx context.Context) error {
+	if err := overlay.ValidateEncryptKey(m.encrypt, m.aesKey); err != nil {
+		return err
+	}
+
 	var backend contracts.StorageProvider
 	switch strings.ToLower(m.backendKind) {
+	case "upstream":
+		up, cleanup, err := dialUpstreamStorage(ctx, m.upstreamID, m.id)
+		if err != nil {
+			return err
+		}
+		backend = up
+		m.upstreamStop = cleanup
 	case "", "memory", "mem":
-		backend = nil // overlay.New uses MemBackend
+		if os.Getenv("OVERLAY_ALLOW_MEMORY") != "1" {
+			return fmt.Errorf("memory backend requires OVERLAY_ALLOW_MEMORY=1 (ephemeral; use OVERLAY_BACKEND=minio or OVERLAY_UPSTREAM)")
+		}
+		backend = nil
 	case "s3", "minio":
 		s3, err := overlay.NewS3Backend(m.s3)
 		if err != nil {
@@ -205,13 +226,18 @@ func (m *Module) Init(ctx context.Context) error {
 		}
 		backend = s3
 	default:
-		return fmt.Errorf("unknown OVERLAY_BACKEND %q (want memory|s3|minio)", m.backendKind)
+		return fmt.Errorf("unknown OVERLAY_BACKEND %q (want upstream|memory|s3|minio)", m.backendKind)
 	}
+
 	p, err := overlay.New(m.overlayConfig(), backend)
 	if err != nil {
 		return err
 	}
+	if err := p.Init(ctx); err != nil {
+		return fmt.Errorf("overlay init: %w", err)
+	}
 	m.provider = p
+
 	var lc net.ListenConfig
 	lis, err := lc.Listen(ctx, "tcp", m.grpcAddr)
 	if err != nil {
@@ -219,7 +245,11 @@ func (m *Module) Init(ctx context.Context) error {
 	}
 	m.lis = lis
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if err := m.Health(r.Context()); err != nil {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
@@ -259,6 +289,9 @@ func (m *Module) Stop(ctx context.Context) error {
 	if m.grpcSrv != nil {
 		m.grpcSrv.GracefulStop()
 	}
+	if m.upstreamStop != nil {
+		m.upstreamStop()
+	}
 	return nil
 }
 
@@ -266,7 +299,7 @@ func (m *Module) Health(ctx context.Context) error {
 	if m.provider == nil {
 		return fmt.Errorf("not initialized")
 	}
-	return nil
+	return m.provider.Health(ctx)
 }
 
 func parseBool(v string) (bool, error) {
