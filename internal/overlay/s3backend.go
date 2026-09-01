@@ -84,6 +84,18 @@ func (s *S3Backend) EnsureBucket(ctx context.Context) error {
 	return s.client.MakeBucket(ctx, s.bucket, minio.MakeBucketOptions{})
 }
 
+// Health probes bucket reachability.
+func (s *S3Backend) Health(ctx context.Context) error {
+	ok, err := s.client.BucketExists(ctx, s.bucket)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("bucket %q does not exist", s.bucket)
+	}
+	return nil
+}
+
 func (s *S3Backend) Put(ctx context.Context, key string, data io.Reader, size int64) error {
 	_, err := s.client.PutObject(ctx, s.bucket, s.key(key), data, size, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",

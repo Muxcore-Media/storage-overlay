@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -47,35 +46,63 @@ func (s *Server) get() *overlay.Provider {
 
 func (s *Server) Put(stream storagev1.StorageService_PutServer) error {
 	st := s.get()
-	var (
-		key  string
-		size int64
-		buf  bytes.Buffer
-	)
-	for {
-		msg, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if msg.GetKey() != "" {
-			key = msg.GetKey()
-			size = msg.GetTotalSize()
-		}
-		if chunk := msg.GetChunk(); len(chunk) > 0 {
-			_, _ = buf.Write(chunk)
-		}
+	first, err := stream.Recv()
+	if errors.Is(err, io.EOF) {
+		return status.Error(codes.InvalidArgument, "missing key")
 	}
+	if err != nil {
+		return err
+	}
+	key := first.GetKey()
+	size := first.GetTotalSize()
 	if key == "" {
 		return status.Error(codes.InvalidArgument, "missing key")
 	}
-	if size <= 0 {
-		size = int64(buf.Len())
-	}
-	if err := st.Put(stream.Context(), key, bytes.NewReader(buf.Bytes()), size); err != nil {
+
+	pr, pw := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		defer func() { _ = pw.Close() }()
+		if chunk := first.GetChunk(); len(chunk) > 0 {
+			if _, werr := pw.Write(chunk); werr != nil {
+				errCh <- werr
+				return
+			}
+		}
+		for {
+			msg, recvErr := stream.Recv()
+			if errors.Is(recvErr, io.EOF) {
+				break
+			}
+			if recvErr != nil {
+				errCh <- recvErr
+				_ = pw.CloseWithError(recvErr)
+				return
+			}
+			if chunk := msg.GetChunk(); len(chunk) > 0 {
+				if _, werr := pw.Write(chunk); werr != nil {
+					errCh <- werr
+					return
+				}
+			}
+		}
+		close(errCh)
+	}()
+
+	putErr := make(chan error, 1)
+	go func() {
+		putErr <- st.Put(stream.Context(), key, pr, size)
+	}()
+	if err := <-putErr; err != nil {
 		return status.Errorf(codes.Internal, "put: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		return status.Errorf(codes.Internal, "put stream: %v", err)
+	}
+	if size <= 0 {
+		if info, statErr := st.Stat(stream.Context(), key); statErr == nil {
+			size = info.Size
+		}
 	}
 	return stream.SendAndClose(&storagev1.PutResponse{Key: key, Size: size})
 }
