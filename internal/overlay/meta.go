@@ -9,10 +9,10 @@ import (
 
 // objectMeta is persisted for Stat/List without decrypting blobs.
 type objectMeta struct {
-	Hash         string    `json:"hash,omitempty"`
-	Size         int64     `json:"size"`
 	LastModified time.Time `json:"last_modified"`
+	Hash         string    `json:"hash,omitempty"`
 	ContentType  string    `json:"content_type,omitempty"`
+	Size         int64     `json:"size"`
 }
 
 func encodeMeta(m objectMeta) ([]byte, error) {

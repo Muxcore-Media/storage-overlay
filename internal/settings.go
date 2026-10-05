@@ -37,6 +37,44 @@ func (m *Module) Settings() []contracts.SettingDef {
 	return defs
 }
 
+// checkImmutableBool parses value and rejects it unless it equals current: the
+// setting affects the on-disk layout and cannot change at runtime.
+func checkImmutableBool(name, value string, current bool) error {
+	b, err := parseBool(value)
+	if err != nil {
+		return err
+	}
+	if b != current {
+		return fmt.Errorf("cannot change %s at runtime: would alter on-disk layout", name)
+	}
+	return nil
+}
+
+// parseBoolInto parses value and stores it in dst only when it is valid.
+func parseBoolInto(dst *bool, value string) error {
+	b, err := parseBool(value)
+	if err != nil {
+		return err
+	}
+	*dst = b
+	return nil
+}
+
+// s3StringField maps a plain-string S3 setting key (or alias) to its field.
+func (m *Module) s3StringField(key string) *string {
+	switch key {
+	case "s3_endpoint", "OVERLAY_S3_ENDPOINT", "S3_ENDPOINT":
+		return &m.s3.Endpoint
+	case "s3_bucket", "OVERLAY_S3_BUCKET", "S3_BUCKET":
+		return &m.s3.Bucket
+	case "s3_region", "OVERLAY_S3_REGION", "S3_REGION":
+		return &m.s3.Region
+	case "s3_prefix", "OVERLAY_S3_PREFIX", "S3_PREFIX":
+		return &m.s3.Prefix
+	}
+	return nil
+}
+
 func (m *Module) UpdateSetting(key, value string) error {
 	value = strings.TrimSpace(value)
 	m.cfgMu.Lock()
@@ -54,28 +92,16 @@ func (m *Module) UpdateSetting(key, value string) error {
 			m.backendKind = "upstream"
 		}
 	case "encrypt", "OVERLAY_ENCRYPT":
-		b, err := parseBool(value)
-		if err != nil {
+		if err := checkImmutableBool("encrypt", value, m.encrypt); err != nil {
 			return err
-		}
-		if b != m.encrypt {
-			return fmt.Errorf("cannot change encrypt at runtime: would alter on-disk layout")
 		}
 	case "compress", "OVERLAY_COMPRESS":
-		b, err := parseBool(value)
-		if err != nil {
+		if err := checkImmutableBool("compress", value, m.compress); err != nil {
 			return err
-		}
-		if b != m.compress {
-			return fmt.Errorf("cannot change compress at runtime: would alter on-disk layout")
 		}
 	case "dedup", "OVERLAY_DEDUP":
-		b, err := parseBool(value)
-		if err != nil {
+		if err := checkImmutableBool("dedup", value, m.dedup); err != nil {
 			return err
-		}
-		if b != m.dedup {
-			return fmt.Errorf("cannot change dedup at runtime: would alter on-disk layout")
 		}
 	case "aes_key_hex", "OVERLAY_AES_KEY_HEX":
 		if value == "********" {
@@ -94,12 +120,6 @@ func (m *Module) UpdateSetting(key, value string) error {
 		m.aesKey = b
 	case "prefix", "OVERLAY_PREFIX":
 		m.prefix = value
-	case "s3_endpoint", "OVERLAY_S3_ENDPOINT", "S3_ENDPOINT":
-		m.s3.Endpoint = value
-	case "s3_bucket", "OVERLAY_S3_BUCKET", "S3_BUCKET":
-		m.s3.Bucket = value
-	case "s3_region", "OVERLAY_S3_REGION", "S3_REGION":
-		m.s3.Region = value
 	case "s3_access_key", "OVERLAY_S3_ACCESS_KEY", "S3_ACCESS_KEY":
 		if value == "********" {
 			return nil
@@ -110,22 +130,20 @@ func (m *Module) UpdateSetting(key, value string) error {
 			return nil
 		}
 		m.s3.SecretKey = value
-	case "s3_prefix", "OVERLAY_S3_PREFIX", "S3_PREFIX":
-		m.s3.Prefix = value
 	case "s3_use_ssl", "OVERLAY_S3_USE_SSL", "S3_USE_SSL":
-		b, err := parseBool(value)
-		if err != nil {
+		if err := parseBoolInto(&m.s3.UseSSL, value); err != nil {
 			return err
 		}
-		m.s3.UseSSL = b
 	case "s3_path_style", "OVERLAY_S3_PATH_STYLE", "S3_PATH_STYLE":
-		b, err := parseBool(value)
-		if err != nil {
+		if err := parseBoolInto(&m.s3.PathStyle, value); err != nil {
 			return err
 		}
-		m.s3.PathStyle = b
 	default:
-		return fmt.Errorf("unknown setting %q", key)
+		dst := m.s3StringField(key)
+		if dst == nil {
+			return fmt.Errorf("unknown setting %q", key)
+		}
+		*dst = value
 	}
 	if m.provider == nil {
 		return nil

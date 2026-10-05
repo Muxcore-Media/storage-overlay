@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -201,9 +200,7 @@ func (p *Provider) rebuildDedupIndex(ctx context.Context) error {
 	meta := map[string]objectMeta{}
 	for _, it := range items {
 		logical := it.Key
-		if strings.HasPrefix(logical, metaPrefix) {
-			logical = logical[len(metaPrefix):]
-		}
+		logical = strings.TrimPrefix(logical, metaPrefix)
 		rc, err := p.backend.Get(ctx, p.backendKey("meta/"+logical))
 		if err != nil {
 			continue
@@ -232,7 +229,7 @@ func (p *Provider) rebuildDedupIndex(ctx context.Context) error {
 func (p *Provider) rebuildSidecarIndex(ctx context.Context) error {
 	items, err := p.backend.List(ctx, p.backendKey("sidecar/"))
 	if err != nil {
-		return nil // sidecars are optional
+		return nil //nolint:nilerr // sidecars are optional; a failed listing just means none to index
 	}
 	meta := map[string]objectMeta{}
 	prefix := p.backendKey("sidecar/")
@@ -325,7 +322,7 @@ func (p *Provider) Put(ctx context.Context, key string, data io.Reader, size int
 	}
 	_ = tmp.Close()
 
-	readBlob, err := os.Open(tmpPath)
+	readBlob, err := os.Open(tmpPath) //nolint:gosec // tmpPath is our own os.CreateTemp file, not user input
 	if err != nil {
 		return err
 	}
@@ -358,8 +355,8 @@ func (p *Provider) Put(ctx context.Context, key string, data io.Reader, size int
 		p.mu.Unlock()
 
 		if needBlob {
-			if err := p.backend.Put(ctx, blobKey, readBlob, blobSize); err != nil {
-				return err
+			if putErr := p.backend.Put(ctx, blobKey, readBlob, blobSize); putErr != nil {
+				return putErr
 			}
 		}
 
@@ -384,9 +381,9 @@ func (p *Provider) Put(ctx context.Context, key string, data io.Reader, size int
 		p.meta[key] = om
 		p.mu.Unlock()
 
-		metaBytes, err := encodeMeta(om)
-		if err != nil {
-			return err
+		metaBytes, encErr := encodeMeta(om)
+		if encErr != nil {
+			return encErr
 		}
 		return p.backend.Put(ctx, p.backendKey("meta/"+key), bytes.NewReader(metaBytes), int64(len(metaBytes)))
 	}
@@ -395,8 +392,8 @@ func (p *Provider) Put(ctx context.Context, key string, data io.Reader, size int
 	p.meta[key] = om
 	p.mu.Unlock()
 
-	if err := p.backend.Put(ctx, p.backendKey(key), readBlob, blobSize); err != nil {
-		return err
+	if putErr := p.backend.Put(ctx, p.backendKey(key), readBlob, blobSize); putErr != nil {
+		return putErr
 	}
 
 	sidecar, err := encodeMeta(om)
@@ -606,9 +603,7 @@ func (p *Provider) List(ctx context.Context, prefix string) ([]contracts.ObjectI
 		out := make([]contracts.ObjectInfo, 0, len(items))
 		for _, it := range items {
 			logical := it.Key
-			if strings.HasPrefix(logical, metaPrefix) {
-				logical = logical[len(metaPrefix):]
-			}
+			logical = strings.TrimPrefix(logical, metaPrefix)
 			info, err := p.Stat(ctx, logical)
 			if err != nil {
 				continue
@@ -667,22 +662,6 @@ func (p *Provider) Stream(ctx context.Context, key string, offset, length int64)
 		return io.NopCloser(&offsetLimitReader{src: plain, skip: offset, remain: lim}), nil
 	}
 	return plain, nil
-}
-
-func seal(key, plaintext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, plaintext, nil), nil
 }
 
 func open(key, blob []byte) ([]byte, error) {

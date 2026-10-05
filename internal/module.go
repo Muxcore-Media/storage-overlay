@@ -233,7 +233,7 @@ func (m *Module) Init(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := p.Init(ctx); err != nil {
+	if err = p.Init(ctx); err != nil {
 		return fmt.Errorf("overlay init: %w", err)
 	}
 	m.provider = p

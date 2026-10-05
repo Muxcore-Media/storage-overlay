@@ -36,34 +36,20 @@ func writeStreamHeader(w io.Writer, compress, encrypt bool) error {
 	return err
 }
 
-func readStreamHeader(r io.Reader) (compress, encrypt bool, err error) {
-	hdr := make([]byte, 5)
-	if _, err = io.ReadFull(r, hdr); err != nil {
-		return false, false, err
-	}
-	if hdr[0] != streamMagic0 || hdr[1] != streamMagic1 || hdr[2] != streamMagic2 {
-		return false, false, fmt.Errorf("invalid stream magic")
-	}
-	if hdr[3] != streamFormat {
-		return false, false, fmt.Errorf("unsupported stream format %d", hdr[3])
-	}
-	return hdr[4]&flagCompress != 0, hdr[4]&flagEncrypt != 0, nil
-}
-
 // streamTransformOut writes compressed/encrypted payload. The returned hash is SHA-256
 // of the pre-encryption payload (post-gzip), matching legacy dedup semantics.
-func streamTransformOut(w io.Writer, cfg Config, plain io.Reader) (preEncryptHash []byte, plainSize int64, err error) {
+func streamTransformOut(w io.Writer, cfg Config, plain io.Reader) (preEncryptHash []byte, plainSize int64, _ error) {
 	counted := &countReader{r: plain}
 	preEncHash := sha256.New()
 
 	if !cfg.Compress && !cfg.Encrypt {
-		if _, err = io.Copy(io.MultiWriter(w, preEncHash), counted); err != nil {
+		if _, err := io.Copy(io.MultiWriter(w, preEncHash), counted); err != nil {
 			return nil, 0, err
 		}
 		return preEncHash.Sum(nil), counted.n, nil
 	}
 
-	if err = writeStreamHeader(w, cfg.Compress, cfg.Encrypt); err != nil {
+	if err := writeStreamHeader(w, cfg.Compress, cfg.Encrypt); err != nil {
 		return nil, 0, err
 	}
 
@@ -76,7 +62,7 @@ func streamTransformOut(w io.Writer, cfg Config, plain io.Reader) (preEncryptHas
 			closeErr := zw.Close()
 			_ = pw.CloseWithError(errors.Join(copyErr, closeErr))
 		}()
-		if err = writeEncryptedChunks(w, cfg.AESKey, pr); err != nil {
+		if err := writeEncryptedChunks(w, cfg.AESKey, pr); err != nil {
 			return nil, 0, err
 		}
 		return preEncHash.Sum(nil), counted.n, nil
@@ -89,7 +75,7 @@ func streamTransformOut(w io.Writer, cfg Config, plain io.Reader) (preEncryptHas
 	}
 
 	if cfg.Encrypt {
-		if err = writeEncryptedChunks(cw, cfg.AESKey, counted); err != nil {
+		if err := writeEncryptedChunks(cw, cfg.AESKey, counted); err != nil {
 			_ = cw.Close()
 			return nil, 0, err
 		}
@@ -98,12 +84,12 @@ func streamTransformOut(w io.Writer, cfg Config, plain io.Reader) (preEncryptHas
 		for {
 			n, readErr := counted.Read(buf)
 			if n > 0 {
-				if _, err = cw.Write(buf[:n]); err != nil {
+				if _, err := cw.Write(buf[:n]); err != nil {
 					_ = cw.Close()
 					return nil, 0, err
 				}
 			}
-			if readErr == io.EOF {
+			if errors.Is(readErr, io.EOF) {
 				break
 			}
 			if readErr != nil {
@@ -112,12 +98,12 @@ func streamTransformOut(w io.Writer, cfg Config, plain io.Reader) (preEncryptHas
 			}
 		}
 	} else {
-		if _, err = io.Copy(cw, counted); err != nil {
+		if _, err := io.Copy(cw, counted); err != nil {
 			_ = cw.Close()
 			return nil, 0, err
 		}
 	}
-	if err = cw.Close(); err != nil {
+	if err := cw.Close(); err != nil {
 		return nil, 0, err
 	}
 	return preEncHash.Sum(nil), counted.n, nil
@@ -152,12 +138,12 @@ func writeEncryptedChunks(w io.Writer, key []byte, plain io.Reader) error {
 		n, readErr := plain.Read(buf)
 		if n > 0 {
 			nonce := make([]byte, gcm.NonceSize())
-			if _, err := rand.Read(nonce); err != nil {
+			if _, err = rand.Read(nonce); err != nil {
 				return err
 			}
 			sealed := gcm.Seal(nil, nonce, buf[:n], nil)
 			var lenBuf [4]byte
-			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(sealed)))
+			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(sealed))) //nolint:gosec // sealed is at most plainChunkSize+AEAD overhead, far below MaxUint32
 			if _, err = w.Write(lenBuf[:]); err != nil {
 				return err
 			}
@@ -180,7 +166,7 @@ func writeEncryptedChunks(w io.Writer, key []byte, plain io.Reader) error {
 func streamTransformIn(r io.Reader, cfg Config) (io.ReadCloser, error) {
 	peek := make([]byte, 5)
 	n, err := io.ReadFull(r, peek)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, err
 	}
 	if n >= 4 && peek[0] == streamMagic0 && peek[1] == streamMagic1 && peek[2] == streamMagic2 {
@@ -190,17 +176,18 @@ func streamTransformIn(r io.Reader, cfg Config) (io.ReadCloser, error) {
 		compress := peek[4]&flagCompress != 0
 		encrypt := peek[4]&flagEncrypt != 0
 		if encrypt && compress {
-			dec, err := newDecryptChunkReader(r, cfg.AESKey)
-			if err != nil {
-				return nil, err
+			dec, decErr := newDecryptChunkReader(r, cfg.AESKey)
+			if decErr != nil {
+				return nil, decErr
 			}
-			zr, err := gzip.NewReader(dec)
-			if err != nil {
-				return nil, err
+			zr, zrErr := gzip.NewReader(dec)
+			if zrErr != nil {
+				return nil, zrErr
 			}
 			return zr, nil
 		}
-		var plain io.Reader = r
+		var plain io.Reader
+		plain = r
 		if encrypt {
 			plain, err = newDecryptChunkReader(r, cfg.AESKey)
 			if err != nil {
@@ -208,9 +195,9 @@ func streamTransformIn(r io.Reader, cfg Config) (io.ReadCloser, error) {
 			}
 		}
 		if compress {
-			zr, err := gzip.NewReader(plain)
-			if err != nil {
-				return nil, err
+			zr, zrErr := gzip.NewReader(plain)
+			if zrErr != nil {
+				return nil, zrErr
 			}
 			return zr, nil
 		}

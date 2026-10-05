@@ -22,9 +22,9 @@ import (
 )
 
 type grpcStorageBackend struct {
-	id     string
 	client storagev1.StorageServiceClient
 	conn   *grpc.ClientConn
+	id     string
 }
 
 func (g *grpcStorageBackend) Put(ctx context.Context, key string, data io.Reader, size int64) error {
@@ -43,8 +43,8 @@ func (g *grpcStorageBackend) Put(ctx context.Context, key string, data io.Reader
 				req.TotalSize = size
 				first = false
 			}
-			if err := stream.Send(req); err != nil {
-				return err
+			if sendErr := stream.Send(req); sendErr != nil {
+				return sendErr
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
@@ -55,8 +55,8 @@ func (g *grpcStorageBackend) Put(ctx context.Context, key string, data io.Reader
 		}
 	}
 	if first {
-		if err := stream.Send(&storagev1.PutRequest{Key: key, TotalSize: size}); err != nil {
-			return err
+		if sendErr := stream.Send(&storagev1.PutRequest{Key: key, TotalSize: size}); sendErr != nil {
+			return sendErr
 		}
 	}
 	_, err = stream.CloseAndRecv()
@@ -79,8 +79,8 @@ func (g *grpcStorageBackend) Get(ctx context.Context, key string) (io.ReadCloser
 }
 
 type grpcReadCloser struct {
-	first  []byte
 	stream storagev1.StorageService_GetClient
+	first  []byte
 }
 
 func (r *grpcReadCloser) Read(p []byte) (int, error) {
