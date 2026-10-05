@@ -44,17 +44,18 @@ go run ./cmd/module
 ## Run (MinIO backend — durable laptop path)
 
 ```bash
-# terminal A
+# terminal A (generate credentials; no default)
+export MINIO_ROOT_USER="muxcore-$(openssl rand -hex 4)" MINIO_ROOT_PASSWORD="$(openssl rand -hex 16)"
 docker run --rm -p 9000:9000 -p 9001:9001 \
-  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
   minio/minio server /data --console-address :9001
 
 # terminal B
 export OVERLAY_BACKEND=minio
 export S3_ENDPOINT=127.0.0.1:9000
 export S3_BUCKET=muxcore
-export S3_ACCESS_KEY=minioadmin
-export S3_SECRET_KEY=minioadmin
+export S3_ACCESS_KEY="$MINIO_ROOT_USER"
+export S3_SECRET_KEY="$MINIO_ROOT_PASSWORD"
 export S3_PATH_STYLE=true
 export S3_USE_SSL=false
 export OVERLAY_ENCRYPT=true
