@@ -3,10 +3,10 @@ module github.com/Muxcore-Media/storage-overlay
 go 1.26.6
 
 require (
-	github.com/Muxcore-Media/core v0.6.0
+	github.com/Muxcore-Media/core v0.6.12
 	github.com/Muxcore-Media/core/pkg/contracts v0.6.0
-	github.com/Muxcore-Media/core/sdk/go/client v0.6.0
-	github.com/Muxcore-Media/core/sdk/go/module v0.6.0
+	github.com/Muxcore-Media/core/sdk/go/client v0.6.1
+	github.com/Muxcore-Media/core/sdk/go/module v0.6.3
 	github.com/johannesboyne/gofakes3 v1.2.0
 	github.com/minio/minio-go/v7 v7.2.1
 	google.golang.org/grpc v1.83.2

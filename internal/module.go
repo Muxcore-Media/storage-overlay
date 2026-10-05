@@ -17,6 +17,7 @@ import (
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
+	manifest "github.com/Muxcore-Media/storage-overlay"
 	"github.com/Muxcore-Media/storage-overlay/internal/overlay"
 	"github.com/Muxcore-Media/storage-overlay/internal/server"
 )
@@ -175,7 +176,7 @@ func bytesRepeat(b byte, n int) []byte {
 
 func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
-		ID: m.id, Name: "Storage Overlay", Version: "0.1.0",
+		ID: m.id, Name: "Storage Overlay", Version: modulesdk.ManifestVersion(manifest.ManifestJSON),
 		Roles:        []string{"storage", "infrastructure"},
 		Description:  "Storage overlay: encryption, compression, content-hash dedup over upstream storage",
 		Author:       "MuxCore",
